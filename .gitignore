@@ -8,4 +8,4 @@ __pycache__/
 .venv
 
 # Trained model weights
-weights.keras
+*.keras
