@@ -1,0 +1,11 @@
+# Python related files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.npz
+*.npy
+.venv
+
+# Trained model weights
+weights.keras
