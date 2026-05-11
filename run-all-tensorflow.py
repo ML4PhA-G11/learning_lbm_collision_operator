@@ -1,5 +1,10 @@
-import numpy as np
+import os
+from pathlib import Path
+
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import numpy as np
 
 import tensorflow as tf
 import keras
@@ -12,11 +17,20 @@ from keras.layers import Dense
 from keras.callbacks import EarlyStopping, ModelCheckpoint
 from keras import backend as K
 
-import tensorflow as tf
-from keras import backend as K
-
 import datetime
 from utils import *
+
+
+ARTIFACTS_DIR = Path(__file__).resolve().parent / "artifacts-run-all-tensorflow"
+ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
+
+DATASET_PATH        = ARTIFACTS_DIR / "example_dataset.npz"
+WEIGHTS_PATH        = ARTIFACTS_DIR / "weights.keras"
+MODEL_PATH          = ARTIFACTS_DIR / "example_network.keras"
+LOSS_PLOT_PATH      = ARTIFACTS_DIR / "training_loss.png"
+DECAY_PLOT_PATH     = ARTIFACTS_DIR / "velocity_decay.png"
+FIELDS_PLOT_DIR     = ARTIFACTS_DIR / "velocity_fields"
+FIELDS_PLOT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def compute_rho_u(num_samples, rho_min=0.95, rho_max=1.05, u_abs_min=0.0, u_abs_max=0.01):
@@ -222,7 +236,7 @@ while idx < n_samples:
 
 # store data on file
 
-np.savez('example_dataset.npz', 
+np.savez(DATASET_PATH,
         f_pre  = fPreLst,
         f_post = fPostLst,
         f_eq   = fEqLst
@@ -238,7 +252,7 @@ np.savez('example_dataset.npz',
 K.set_floatx('float64')
 
 # read training dataset
-feq, fpre, fpost = load_data('example_dataset.npz')
+feq, fpre, fpost = load_data(DATASET_PATH)
 
 # normalize data on density 
 feq   = feq   / np.sum(feq,axis=1)[:,np.newaxis]
@@ -259,7 +273,7 @@ model = create_model(loss=rmsre, ll_activation="softmax")
 es_callback = EarlyStopping(monitor="val_loss", patience=patience, restore_best_weights=True)
 
 # Save best model during training
-ck_callback = ModelCheckpoint(filepath="weights.keras", monitor="val_loss", save_best_only=True)
+ck_callback = ModelCheckpoint(filepath=str(WEIGHTS_PATH), monitor="val_loss", save_best_only=True)
 
 keras_callbacks = [es_callback, ck_callback]
 
@@ -268,19 +282,19 @@ hist = model.fit(fpre_train, fpost_train,
                  epochs=n_epochs, verbose=verbose, callbacks=keras_callbacks, 
                  validation_data=(fpre_test, fpost_test), batch_size=batch_size)
 
-model.load_weights("weights.keras")
-model.save("example_network.keras")
+model.load_weights(str(WEIGHTS_PATH))
+model.save(str(MODEL_PATH))
 
 model.evaluate(fpre_test, fpost_test)
 
-import matplotlib.pyplot as plt
-
+plt.figure()
 plt.semilogy( hist.history['loss']    , lw=3, label='Training'   )
 plt.semilogy( hist.history['val_loss'], lw=3, label='Validation' )
 
 plt.legend(loc='best', frameon=False)
 
-plt.show()
+plt.savefig(LOSS_PLOT_PATH, dpi=120, bbox_inches="tight")
+plt.close()
 
 
 #########################################################
@@ -294,8 +308,7 @@ K.set_floatx('float64')
 ##########################################################
 # Import trained model from file
 
-import keras
-model = keras.models.load_model("example_network.keras", custom_objects={'rmsre': rmsre})
+model = keras.models.load_model(str(MODEL_PATH), custom_objects={'rmsre': rmsre})
 model.summary()
 
 ###########################################################
@@ -432,37 +445,40 @@ ax.legend(loc='best', frameon=False, prop={'size' : 16})
 
 ax.tick_params(which="both",direction="in",top="on",right="on",labelsize=14)
 
-plt.show()
+fig.savefig(DECAY_PLOT_PATH, dpi=120, bbox_inches="tight")
+plt.close(fig)
 
 
 w=3.46*3
 h=2.14*3
 
-X, Y = np.meshgrid(np.arange(0, nx), 
+X, Y = np.meshgrid(np.arange(0, nx),
                    np.arange(0, ny)
                    )
 
 tLst = np.arange(0, niter, dumpit)
 
 for i, t in enumerate( tLst ):
-    
+
     fig = plt.figure(figsize=(w,h))
-    ax  = fig.add_subplot(111)    
-    
+    ax  = fig.add_subplot(111)
+
     ux  = dumpfile[dumpfile[:,0]==t, 2].reshape( (nx,ny) )
-    uy  = dumpfile[dumpfile[:,0]==t, 3].reshape( (nx,ny) )    
-    
+    uy  = dumpfile[dumpfile[:,0]==t, 3].reshape( (nx,ny) )
+
     u = (ux**2 + uy**2)**0.5
-    
+
     vmin=0
     vmax=1e-2
-    
+
     im = ax.imshow(u)#, vmax=vmax, vmin=vmin)
-    
+
     ax.streamplot(X, Y, ux, uy, density = 0.5, color='w')
-    
+
     fig.colorbar(im, ax=ax, orientation='vertical', pad=0, shrink=0.69)
-    
+
     ax.set_title(f"Iteration {t}", size=16)
-    
-    plt.show()
+
+    fig.savefig(FIELDS_PLOT_DIR / f"velocity_field_t{int(t):05d}.png",
+                dpi=120, bbox_inches="tight")
+    plt.close(fig)
