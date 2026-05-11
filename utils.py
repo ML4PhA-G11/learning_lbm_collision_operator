@@ -1,9 +1,9 @@
 import numpy as np
-from tensorflow.keras import backend as K
+from kerascompat import K, ops
 from numba import jit
 
 def rmsre(y_true, y_pred, eps=1e-8):
-    return K.sqrt( K.mean( K.square( (y_true - y_pred) / (y_true + eps) ), axis=-1) )
+    return ops.sqrt( ops.mean( ops.square( (y_true - y_pred) / (y_true + eps) ), axis=-1) )
 
 def LB_stencil():
     
