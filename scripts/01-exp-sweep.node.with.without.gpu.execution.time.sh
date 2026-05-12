@@ -98,11 +98,36 @@ if [[ $SUBMIT -eq 1 ]]; then
     for cfg in "${CONFIGS[@]}"; do
         read -r LABEL PART GPUS CPUS <<<"$cfg"
         NAME="lbm-tf-${LABEL}"
+
+        # Per-partition tweaks to improve scheduling. For gpu_mig we ask
+        # for the exact MIG profile Snellius exposes (a100_3g.20gb, 32
+        # slices across gcn[2-5]) and a 45-min walltime so the job is
+        # eligible for backfill.
+        # Per-partition tweaks. For gpu_mig we pin the exact MIG profile
+        # Snellius exposes (a100_3g.20gb, 32 slices total across gcn[2-5])
+        # so the scheduler matches us against any of them, and we request
+        # 45 min instead of 1 h so the job is eligible for backfill into
+        # gaps between longer jobs.
+        TIME_ARG="--time=01:00:00"
+        case "$PART" in
+            gpu_mig)
+                # Typed --gpus form cleanly overrides the default --gpus=1
+                # in jobs/run-all-tensorflow.sh; --gres would conflict with
+                # it ("with and without type identification" sbatch error).
+                GPU_FLAG=(--gpus="a100_3g.20gb:${GPUS}")
+                TIME_ARG="--time=00:45:00"
+                ;;
+            *)
+                GPU_FLAG=(--gpus="$GPUS")
+                ;;
+        esac
+
         JID=$(sbatch --parsable \
                 --job-name="$NAME" \
                 --partition="$PART" \
-                --gpus="$GPUS" \
+                "${GPU_FLAG[@]}" \
                 --cpus-per-task="$CPUS" \
+                "$TIME_ARG" \
                 --output="jobs/logs/${NAME}-%j.out" \
                 --error="jobs/logs/${NAME}-%j.err" \
                 jobs/run-all-tensorflow.sh)
@@ -210,13 +235,14 @@ done < "$MAP_FILE"
 } >> "$SUMMARY"
 
 # rough SBU rates (per allocated unit per hour):
-#   rome:     1 SBU per core-hour                                 -> 16 cpu  ≈ 16/h
-#   gpu_mig:  ~ 1/7 of a full A100 (≈18 SBU/h per slice typical)
+#   rome:     1 SBU per core-hour                                 -> 16 cpu ≈ 16/h
+#   gpu_mig:  Snellius slices each A100 into a100_3g.20gb (3/7 of
+#             the GPU). 3/7 × 128 ≈ 55 SBU/h per slice.
 #   gpu_a100: ~128 SBU per A100-hour
 #   gpu_h100: ~192 SBU per H100-hour (newer; check `accinfo`)
 declare -A RATE=(
     [cpu_rome]=16
-    [gpu_mig]=18
+    [gpu_mig]=55
     [gpu_a100]=128
     [gpu_h100]=192
 )
