@@ -1,45 +1,63 @@
 #!/usr/bin/env bash
-# Sweep run-all-tensorflow.py across CPU + 3 GPU partitions on Snellius and
-# build a cost/speed comparison table.
+# Sweep run-all-<framework>.py across CPU + 3 GPU partitions on Snellius
+# and build a cost/speed comparison table.
+#
+# Default framework: tensorflow. Switch to pytorch with the first
+# positional arg:
+#
+#   bash scripts/01-exp-sweep.node.with.without.gpu.execution.time.sh                  # tensorflow
+#   bash scripts/01-exp-sweep.node.with.without.gpu.execution.time.sh pytorch          # pytorch
+#   bash scripts/01-exp-sweep.node.with.without.gpu.execution.time.sh tensorflow --no-wait
+#   bash scripts/01-exp-sweep.node.with.without.gpu.execution.time.sh pytorch --summarize
 #
 # What it does:
-#   1. (Once) Pre-installs tensorflow[and-cuda] into .venv so each GPU job
-#      does not race against the others trying to install it.
-#   2. sbatch-submits 4 jobs with overrides on top of jobs/run-all-tensorflow.sh:
-#        cpu_rome   rome     gpus=0  cpus=16
-#        gpu_mig    gpu_mig  gpus=1  cpus=9
-#        gpu_a100   gpu_a100 gpus=1  cpus=18
-#        gpu_h100   gpu_h100 gpus=1  cpus=16
+#   1. (tensorflow only) Pre-installs tensorflow[and-cuda] into .venv so
+#      each GPU job does not race against the others on `uv pip install`.
+#   2. sbatch-submits 4 jobs using the per-framework Slurm wrapper:
+#        cpu_rome   rome     gpus=0                        cpus=16
+#        gpu_mig    gpu_mig  --gpus=a100_3g.20gb:1         cpus=9   time=00:45:00
+#        gpu_a100   gpu_a100 gpus=1                        cpus=18
+#        gpu_h100   gpu_h100 gpus=1                        cpus=16
 #   3. Waits for all four to finish (poll squeue every 30s).
-#   4. Parses each .out log for the `[job] Total wall time: ...` line plus
-#      sacct Elapsed/State and writes a markdown comparison to:
-#        artifacts-run-all-tensorflow/node-execution-time-comparison.md
-#      Also keeps the job-id map at:
-#        artifacts-run-all-tensorflow/sweep-jobs.tsv
+#   4. Parses each .out log for `[job] Total wall time:` plus sacct
+#      Elapsed/State and writes a per-framework markdown comparison at:
+#        artifacts-run-all-<framework>/node-execution-time-comparison.md
+#      with the job-id map at:
+#        artifacts-run-all-<framework>/sweep-jobs.tsv
 #
-# Usage (run on the Snellius login node):
-#   bash scripts/01-exp-sweep.node.with.without.gpu.execution.time.sh
-#   bash scripts/01-exp-sweep.node.with.without.gpu.execution.time.sh --no-wait
-#       just submits and exits; re-run with no flags to summarize an
-#       existing sweep (uses the saved job IDs from sweep-jobs.tsv).
-#
-# Re-runs: rerunning without --no-wait after a sweep already completed will
-# simply rebuild the markdown from the cached job IDs, which is cheap.
+# Re-runs:
+#   - `--summarize` rebuilds the markdown from the cached job IDs (cheap).
+#   - `--no-wait` just submits and exits; re-run without flags to summarize.
 
 set -euo pipefail
 
 ############################################
-# args
+# args (first positional = framework; rest = flags)
 ############################################
+FRAMEWORK="tensorflow"
 WAIT=1
 SUBMIT=1
 for arg in "$@"; do
     case "$arg" in
-        --no-wait)     WAIT=0 ;;
-        --summarize)   SUBMIT=0 ;;  # rebuild markdown only
-        *)             echo "Unknown arg: $arg" >&2; exit 2 ;;
+        tensorflow|pytorch) FRAMEWORK="$arg" ;;
+        --no-wait)          WAIT=0 ;;
+        --summarize)        SUBMIT=0 ;;
+        *)                  echo "Unknown arg: $arg" >&2; exit 2 ;;
     esac
 done
+
+case "$FRAMEWORK" in
+    tensorflow)
+        JOB_SH="jobs/run-all-tensorflow.sh"
+        JOB_PREFIX="lbm-tf"
+        ART_SUFFIX="tensorflow"
+        ;;
+    pytorch)
+        JOB_SH="jobs/run-all-pytorch.sh"
+        JOB_PREFIX="lbm-pt"
+        ART_SUFFIX="pytorch"
+        ;;
+esac
 
 ############################################
 # locate project
@@ -48,10 +66,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$PROJECT_ROOT"
 
-OUT_DIR="$PROJECT_ROOT/artifacts-run-all-tensorflow"
+OUT_DIR="$PROJECT_ROOT/artifacts-run-all-${ART_SUFFIX}"
 mkdir -p "$OUT_DIR" jobs/logs
 MAP_FILE="$OUT_DIR/sweep-jobs.tsv"
 SUMMARY="$OUT_DIR/node-execution-time-comparison.md"
+
+echo "[sweep] Framework: ${FRAMEWORK}"
+echo "[sweep] Job script: ${JOB_SH}"
+echo "[sweep] Output dir: ${OUT_DIR}"
 
 ############################################
 # environment for `uv` (login-node side)
@@ -65,20 +87,32 @@ module load Python/3.12.3-GCCcore-13.3.0 >/dev/null 2>&1 || true
 export PATH="$HOME/.local/bin:$PATH"
 
 ############################################
-# 1. pre-install CUDA extras (idempotent, shared across jobs)
+# 1. one-time installs (per framework, idempotent)
 ############################################
 if [[ $SUBMIT -eq 1 ]]; then
-    if ! uv pip show nvidia-cudnn-cu12 >/dev/null 2>&1; then
-        TF_VERSION="$(uv pip show tensorflow 2>/dev/null | awk '/^Version:/ {print $2}')"
-        if [[ -z "${TF_VERSION}" ]]; then
-            echo "[sweep] ERROR: tensorflow not in .venv — run scripts/snellius-py-runtime-setup.sh first." >&2
-            exit 1
-        fi
-        echo "[sweep] Installing tensorflow[and-cuda]==${TF_VERSION} into .venv (~2-3 GB) ..."
-        uv pip install --quiet "tensorflow[and-cuda]==${TF_VERSION}"
-    else
-        echo "[sweep] CUDA extras already in .venv — skip."
-    fi
+    case "$FRAMEWORK" in
+        tensorflow)
+            if ! uv pip show nvidia-cudnn-cu12 >/dev/null 2>&1; then
+                TF_VERSION="$(uv pip show tensorflow 2>/dev/null | awk '/^Version:/ {print $2}')"
+                if [[ -z "${TF_VERSION}" ]]; then
+                    echo "[sweep] ERROR: tensorflow not in .venv — run scripts/snellius-py-runtime-setup.sh first." >&2
+                    exit 1
+                fi
+                echo "[sweep] Installing tensorflow[and-cuda]==${TF_VERSION} into .venv (~2-3 GB) ..."
+                uv pip install --quiet "tensorflow[and-cuda]==${TF_VERSION}"
+            else
+                echo "[sweep] tensorflow CUDA extras already in .venv — skip."
+            fi
+            ;;
+        pytorch)
+            if ! uv pip show torch >/dev/null 2>&1; then
+                echo "[sweep] torch not in .venv — installing (PyPI wheel bundles CUDA) ..."
+                uv pip install --quiet torch
+            else
+                echo "[sweep] torch already in .venv — skip."
+            fi
+            ;;
+    esac
 fi
 
 ############################################
@@ -97,12 +131,8 @@ if [[ $SUBMIT -eq 1 ]]; then
     declare -a JOB_IDS=()
     for cfg in "${CONFIGS[@]}"; do
         read -r LABEL PART GPUS CPUS <<<"$cfg"
-        NAME="lbm-tf-${LABEL}"
+        NAME="${JOB_PREFIX}-${LABEL}"
 
-        # Per-partition tweaks to improve scheduling. For gpu_mig we ask
-        # for the exact MIG profile Snellius exposes (a100_3g.20gb, 32
-        # slices across gcn[2-5]) and a 45-min walltime so the job is
-        # eligible for backfill.
         # Per-partition tweaks. For gpu_mig we pin the exact MIG profile
         # Snellius exposes (a100_3g.20gb, 32 slices total across gcn[2-5])
         # so the scheduler matches us against any of them, and we request
@@ -112,8 +142,8 @@ if [[ $SUBMIT -eq 1 ]]; then
         case "$PART" in
             gpu_mig)
                 # Typed --gpus form cleanly overrides the default --gpus=1
-                # in jobs/run-all-tensorflow.sh; --gres would conflict with
-                # it ("with and without type identification" sbatch error).
+                # in the TF wrapper; --gres would conflict with it
+                # ("with and without type identification" sbatch error).
                 GPU_FLAG=(--gpus="a100_3g.20gb:${GPUS}")
                 TIME_ARG="--time=00:45:00"
                 ;;
@@ -130,7 +160,7 @@ if [[ $SUBMIT -eq 1 ]]; then
                 "$TIME_ARG" \
                 --output="jobs/logs/${NAME}-%j.out" \
                 --error="jobs/logs/${NAME}-%j.err" \
-                jobs/run-all-tensorflow.sh)
+                "$JOB_SH")
         echo "[sweep] $LABEL on $PART  gpus=$GPUS cpus=$CPUS  -> jobid $JID"
         printf '%s\t%s\t%s\t%s\t%s\n' "$LABEL" "$PART" "$GPUS" "$CPUS" "$JID" >> "$MAP_FILE"
         JOB_IDS+=("$JID")
@@ -167,13 +197,13 @@ echo "[sweep] All jobs have left the queue."
 # 4. parse logs + build markdown
 ############################################
 {
-    echo "# Snellius node/GPU sweep — \`run-all-tensorflow.py\`"
+    echo "# Snellius node/GPU sweep — \`run-all-${ART_SUFFIX}.py\`"
     echo
     echo "_Generated: $(date -Is)_"
     echo
-    echo "Each row launches the same \`run-all-tensorflow.py\` via"
-    echo "\`jobs/run-all-tensorflow.sh\` with sbatch overrides for partition,"
-    echo "GPU count, and CPU count."
+    echo "Each row launches the same \`run-all-${ART_SUFFIX}.py\` via"
+    echo "\`${JOB_SH}\` with sbatch overrides for partition, GPU"
+    echo "count, and CPU count."
     echo
     echo "## Execution times"
     echo
@@ -185,7 +215,7 @@ declare -A WALL_SEC WALL_HMS ELAPSED STATE
 
 while IFS=$'\t' read -r LABEL PART GPUS CPUS JID; do
     [[ "$LABEL" == "label" ]] && continue
-    OUT="jobs/logs/lbm-tf-${LABEL}-${JID}.out"
+    OUT="jobs/logs/${JOB_PREFIX}-${LABEL}-${JID}.out"
     sec="N/A"; hms="N/A"
     if [[ -f "$OUT" ]]; then
         line=$(grep -E '^\[job\] Total wall time:' "$OUT" | tail -1 || true)
@@ -266,13 +296,16 @@ done < "$MAP_FILE"
     echo
     echo "## Notes"
     echo
+    echo "- Framework: **${FRAMEWORK}**."
     echo "- The model is tiny (17,702 params, batch_size=32). GPUs are"
     echo "  under-utilised at this batch size; CPU partitions are often"
     echo "  the best cost/speed pick **without** code changes."
-    echo "- To make GPUs pay off, raise \`batch_size\` (e.g. 1024-4096) in"
-    echo "  \`run-all-tensorflow.py\` and verify loss still converges."
-    echo "- \`gpu_mig\` is the cheapest GPU on Snellius — useful for"
-    echo "  GPU smoke tests before committing to A100/H100 budget."
+    echo "- To make GPUs pay off, raise \`batch_size\` (e.g. 1024-4096)"
+    echo "  and verify loss still converges."
+    echo "- \`gpu_mig\` is the cheapest GPU on Snellius — request the"
+    echo "  typed profile (\`--gpus=a100_3g.20gb:1\`) plus a short"
+    echo "  \`--time\` to be backfill-eligible, both already baked into"
+    echo "  this sweep."
 } >> "$SUMMARY"
 
 echo "[sweep] Summary written to $SUMMARY"
