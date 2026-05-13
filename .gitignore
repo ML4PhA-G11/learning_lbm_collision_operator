@@ -9,3 +9,6 @@ __pycache__/
 
 # Trained model weights
 *.keras
+
+.claude
+artifacts-run-all-tensorflow/
