@@ -1,0 +1,5 @@
+label	partition	gpus	cpus	jobid
+cpu_rome	rome	0	16	22692039
+gpu_mig	gpu_mig	1	9	22694418
+gpu_a100	gpu_a100	1	18	22692041
+gpu_h100	gpu_h100	1	16	22692042

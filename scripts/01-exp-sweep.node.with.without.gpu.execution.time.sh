@@ -136,16 +136,28 @@ if [[ $SUBMIT -eq 1 ]]; then
         # Per-partition tweaks. For gpu_mig we pin the exact MIG profile
         # Snellius exposes (a100_3g.20gb, 32 slices total across gcn[2-5])
         # so the scheduler matches us against any of them, and we request
-        # 45 min instead of 1 h so the job is eligible for backfill into
-        # gaps between longer jobs.
-        TIME_ARG="--time=01:00:00"
+        # a backfill-friendly --time so the job slips into gaps between
+        # longer jobs.
+        #
+        # PyTorch in eager mode (no torch.compile) + per-batch H2D copies
+        # + 8 forward passes per step (D4 symmetry) runs ~3-4x slower
+        # than the TF version on this small model, so pytorch jobs get
+        # a wider time budget.
+        if [[ "$FRAMEWORK" == "pytorch" ]]; then
+            DEFAULT_TIME="03:00:00"
+            MIG_TIME="01:30:00"
+        else
+            DEFAULT_TIME="01:00:00"
+            MIG_TIME="00:45:00"
+        fi
+        TIME_ARG="--time=${DEFAULT_TIME}"
         case "$PART" in
             gpu_mig)
                 # Typed --gpus form cleanly overrides the default --gpus=1
                 # in the TF wrapper; --gres would conflict with it
                 # ("with and without type identification" sbatch error).
                 GPU_FLAG=(--gpus="a100_3g.20gb:${GPUS}")
-                TIME_ARG="--time=00:45:00"
+                TIME_ARG="--time=${MIG_TIME}"
                 ;;
             *)
                 GPU_FLAG=(--gpus="$GPUS")
